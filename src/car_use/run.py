@@ -29,6 +29,10 @@ Commands:
   car-use ecu ini FILE             summarise a TunerStudio .ini (tables, live channels)
   car-use ecu log FILE             summarise an .msl / .csv engine log
   car-use inspect [--sim S] [--expect-vin VIN] [--html FILE] [--md FILE]   used-car scan
+  car-use can-check [--find steering,brake,indicator] [--report] [--model TEXT]
+                                   does the OBD port carry the car's own CAN traffic?
+  car-use record [--pids a,b] [--can] [--can-ids 025,1A0] [--seconds N] [--out DIR]
+                                   log OBD readings and CAN frames to CSV for a drive
   car-use mcp [--sim S]           local MCP server on stdin/stdout
   car-use --version
 """
@@ -251,6 +255,124 @@ def cmd_inspect(args) -> int:
     return 0
 
 
+def _stderr(text: str) -> None:
+    print(f"[car-use] {text}", file=sys.stderr, flush=True)
+
+
+def _positive(value, name: str) -> bool:
+    import math
+    if value is not None and (not math.isfinite(value) or value <= 0):
+        print(f"{name} must be more than zero seconds.", file=sys.stderr)
+        return False
+    return True
+
+
+def cmd_can_check(args) -> int:
+    from .connect import open_vehicle, NoDevice
+    from .doctor import port
+    from .doctor.report import PrivacyError
+    from .transport.base import TransportError
+    from .obd.elm import ElmError
+    find = [x.strip() for x in (args.find or "").split(",") if x.strip()]
+    if find == ["all"]:
+        find = list(port.ACTIONS)
+    bad = [x for x in find if x not in port.ACTIONS]
+    if bad:
+        print(f"can-check: unknown --find {', '.join(bad)}; choose from "
+              f"{', '.join(port.ACTIONS)} or all.", file=sys.stderr)
+        return 2
+    for value, name in ((args.seconds, "--seconds"), (args.action_seconds, "--action-seconds")):
+        if not _positive(value, name):
+            return 2
+    try:
+        v = open_vehicle(_device(args))
+    except NoDevice as e:
+        print(f"no device: {e}", file=sys.stderr)
+        return 1
+    except (TransportError, ElmError, OSError) as e:
+        print(f"cannot connect: {e}", file=sys.stderr)
+        return 1
+    emu = getattr(v, "_emulator", None)
+    act = emu.car.act if emu is not None else None
+    if find:
+        _stderr("Do this with the car parked, handbrake on, engine running in a ventilated "
+                "place. Never while driving.")
+    try:
+        result = port.run(v.elm, v, seconds=args.seconds, find=find,
+                          action_seconds=args.action_seconds,
+                          still_seconds=min(5.0, args.action_seconds),
+                          ready_seconds=0 if emu is not None else 3.0, say=_stderr, act=act)
+        if args.report:
+            out = port.share_report(result, v, model=args.model)
+        else:
+            out = None
+    except KeyboardInterrupt:
+        print("can-check stopped.", file=sys.stderr)
+        return 130
+    except PrivacyError as e:
+        print(f"report refused: {e}", file=sys.stderr)
+        return 1
+    except (TransportError, ElmError, OSError) as e:
+        print(f"cannot check: {e}", file=sys.stderr)
+        return 1
+    finally:
+        v.elm.close()
+        if emu is not None:
+            emu.stop()
+    if out is not None:
+        print(json.dumps(out, indent=2))
+    elif args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print(port.render(result), end="")
+    return 0
+
+
+def cmd_record(args) -> int:
+    from .connect import open_vehicle, NoDevice
+    from .record import Recorder, RecordError
+    from .transport.base import TransportError
+    from .obd.elm import ElmError
+    seconds = args.seconds if args.seconds is not None else (
+        args.minutes * 60 if args.minutes is not None else None)
+    if not _positive(seconds, "--seconds/--minutes"):
+        return 2
+    pids = [x.strip() for x in args.pids.split(",") if x.strip()] if args.pids else None
+    can_ids = [x.strip() for x in args.can_ids.split(",") if x.strip()] if args.can_ids else None
+    try:
+        v = open_vehicle(_device(args))
+    except NoDevice as e:
+        print(f"no device: {e}", file=sys.stderr)
+        return 1
+    except (TransportError, ElmError, OSError) as e:
+        print(f"cannot connect: {e}", file=sys.stderr)
+        return 1
+    try:
+        rec = Recorder(v, out_dir=args.out, pids=pids, can=args.can, can_ids=can_ids,
+                       label=args.label or "", say=_stderr)
+        what = []
+        if rec.pids:
+            what.append("OBD " + ",".join(rec.pids))
+        if rec.can:
+            what.append("CAN " + (",".join(rec.can_ids) if rec.can_ids else "all ids"))
+        until = f"for {seconds:g} s" if seconds else "until Ctrl-C or the ignition goes off"
+        _stderr(f"recording {' + '.join(what)} {until} into {rec.out}")
+        meta = rec.run(seconds=seconds)
+    except (RecordError, ValueError) as e:
+        print(f"record: {e}", file=sys.stderr)
+        return 2
+    except (TransportError, ElmError, OSError) as e:
+        print(f"cannot record: {e}", file=sys.stderr)
+        return 1
+    finally:
+        v.elm.close()
+        if getattr(v, "_emulator", None):
+            v._emulator.stop()
+    print(json.dumps({"folder": meta["folder"], "ended": meta["ended"],
+                      "error": meta.get("error"), "summary": meta["summary"]}, indent=2))
+    return 1 if meta.get("error") else 0
+
+
 def cmd_audit(args) -> int:
     from .kernel.policy import Audit
     a = Audit()
@@ -388,6 +510,27 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--expect-vin")
     sp.add_argument("--html")
     sp.add_argument("--md")
+    sp = sub.add_parser("can-check")
+    sp.add_argument("--sim", default=argparse.SUPPRESS)
+    sp.add_argument("--device", default=argparse.SUPPRESS)
+    sp.add_argument("--seconds", type=float, default=5.0, help="how long to listen first")
+    sp.add_argument("--find", help="steering,brake,indicator or all: guided steps, car parked")
+    sp.add_argument("--action-seconds", type=float, default=10.0,
+                    help="how long each guided step lasts")
+    sp.add_argument("--report", action="store_true",
+                    help="anonymised JSON to share (WMI and model year, never the VIN)")
+    sp.add_argument("--model", help="for --report: the model in your words, e.g. 'Swift VXi 2021'")
+    sp.add_argument("--json", action="store_true", help="full result as JSON")
+    sp = sub.add_parser("record")
+    sp.add_argument("--sim", default=argparse.SUPPRESS)
+    sp.add_argument("--device", default=argparse.SUPPRESS)
+    sp.add_argument("--pids", help="OBD signals, comma-separated (default: speed,rpm,throttle,...)")
+    sp.add_argument("--can", action="store_true", help="also listen to the CAN bus")
+    sp.add_argument("--can-ids", help="only these CAN ids, e.g. 025,1A0 (implies --can)")
+    sp.add_argument("--seconds", type=float)
+    sp.add_argument("--minutes", type=float)
+    sp.add_argument("--out", help="folder to write (default ~/.car-use/recordings/<UTC time>)")
+    sp.add_argument("--label", help="a name for this car or drive, e.g. car-3")
     sp = sub.add_parser("audit")
     sp.add_argument("--verify", action="store_true")
     sp.add_argument("-n", type=int, default=20)
@@ -446,6 +589,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_policy(args)
     if args.cmd == "inspect":
         return cmd_inspect(args)
+    if args.cmd == "can-check":
+        return cmd_can_check(args)
+    if args.cmd == "record":
+        return cmd_record(args)
     if args.cmd == "audit":
         return cmd_audit(args)
     if args.cmd == "bench":

@@ -88,6 +88,27 @@ car-use inspect --md scan.md                                 # save the markdown
 
 This is an OBD scan, not a mechanical inspection: codes, self-checks, identity and charging voltage. It does not compare odometer readings across modules yet. The report includes the full VIN, so don't post it publicly.
 
+### Does your car's OBD port carry steering and brake?
+
+Standard OBD has no reading for steering angle, the brake pedal or the indicators. On many cars the car's own CAN traffic, including those, reaches the OBD port anyway. On others a gateway keeps the port silent. Listen and find out:
+
+```bash
+car-use can-check                                    # open, partial or hidden? sends nothing to the car
+car-use can-check --find steering,brake,indicator    # car parked, engine running: which messages move
+car-use can-check --sim open-bus --find all          # try it on a virtual car
+```
+
+What's known about which makes leave the port open, and how to share what you find: [docs/port-check.md](docs/port-check.md).
+
+### Record a drive
+
+```bash
+car-use record --label car-3                         # speed, rpm, throttle, load... to CSV
+car-use record --can-ids 025,1A0 --minutes 45        # the CAN messages can-check found
+```
+
+Every row has a UTC timestamp, so it lines up with a dashcam. The folder keeps the WMI and model year, never the full VIN. Rates, file formats and syncing with a camera: [docs/recording.md](docs/recording.md).
+
 ## No car? Use a virtual one.
 
 Pretend cars with real problems to solve. Pick one and let your agent work out what's wrong:
@@ -119,6 +140,7 @@ PY
 | `obd-2b` | 2025 scooter on OBD Stage II-B. Only a few sensors answer. | Easy |
 | `healthy-ev` | Illustrative EV profile, not a real model. Almost no engine data, and nothing is wrong. | Tricky |
 | `two-ecu` | Engine and transmission both answer. Codes stay with the ECU that sent them. | Medium |
+| `open-bus` | The OBD port carries the car's own CAN traffic. Find steering, brake and indicator with `can-check --find`. | Medium |
 
 Each virtual car can also pretend to be a different adapter: a genuine ELM327, a cheap clone, or an OBDLink. Run one as a Wi-Fi adapter with `car-use sim p0171 --port 35000` and point any OBD app at it. You can write your own in `~/.car-use/scenarios/`.
 
@@ -149,6 +171,7 @@ PY
 | `ready_for_inspection()` | Whether it would likely pass a US OBD inspection, and what to do if not |
 | `vin_info()` | Decodes the VIN |
 | `raw_obd("221E12")` | Read-only requests for maker-specific data |
+| `listen(seconds)` | Listens to the CAN bus on the OBD port without sending anything. `.summary()` says open, partial or hidden |
 | `clear_dtcs()` | Clears codes, only with your OK (see [Safety](#safe-by-default)) |
 | `dongle_doctor()` | Tests your adapter and grades it |
 | `maker_info()` | What to know about this car's maker: tools, protocols, known problems |
@@ -161,7 +184,7 @@ Readings use standard [COVESA VSS](https://covesa.github.io/vehicle_signal_speci
 | | Today | Coming |
 | --- | --- | --- |
 | **Adapters** | Wi-Fi and USB ELM327 (clones too), OBDLink | Bluetooth adapters, CAN adapters (CANable, PCAN, comma panda) |
-| **Cars** | OBD-II cars, petrol and diesel, CAN and older protocols | Maker-specific data packs, EV battery data, Tesla, Smartcar |
+| **Cars** | OBD-II cars, petrol and diesel, CAN and older protocols. Listening to the CAN bus on the OBD port | Maker-specific data packs, EV battery data, Tesla, Smartcar |
 | **Motorsport** | Any car with an OBD port. TunerStudio .ini files and engine logs (.msl, CSV) | Live data from Speeduino, rusEFI and MegaSquirt ECUs, a virtual copy of your ECU to test changes on, lap coaching |
 | **More than cars** | | Cranes, diggers, generators and trucks (J1939), GPS trackers, makers' fleet systems |
 | **Agents** | Claude Code, Codex, any agent with a shell | MCP server, OpenClaw and Hermes plugins, [car to car](https://agentintercom.org) |

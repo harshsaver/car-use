@@ -1,0 +1,148 @@
+notes = """Illustrative petrol hatchback whose OBD port carries the car's own CAN
+traffic, heard by listening (monitor mode) without asking anything. The message
+ids and byte layouts are invented for the simulator, not copied from any real
+car: steering angle is id 025 bytes 0-1, the brake switch is id 1A0 byte 2 bit
+0x01 (byte 0 is a pressure value), and the left indicator is id 3B7 byte 1 bit
+0x20. Each byte 7 holds a rolling counter that changes on every frame. The
+adapter is OBDLink-style, so it keeps up with the bus. Every other virtual car
+keeps its port silent until asked, like a car with a gateway."""
+
+[car]
+name = "Illustrative 2015 hatchback with an open OBD port (sim)"
+vin = "1CARUSE07F0BUS001"
+protocol = "6"
+
+[adapter]
+profile = "stn"
+
+[signals]
+rpm = { value = 760, jitter = 15 }
+speed = 0
+coolant = { value = 89, jitter = 0.5 }
+load = { value = 21, jitter = 1.5 }
+throttle = 14.1
+map = { value = 32, jitter = 1 }
+maf = { value = 2.5, jitter = 0.1 }
+iat = 31
+battery = { value = 14.1, jitter = 0.05 }
+runtime = { ramp_from = 300, ramp_to = 3900, seconds = 3600 }
+fuel = 48
+distance_since_clear = 6120
+warmups_since_clear = 190
+
+[monitors]
+misfire = "complete"
+fuel_system = "complete"
+components = "complete"
+catalyst = "complete"
+evap = "complete"
+o2_sensor = "complete"
+
+# Engine: rpm x4 in bytes 0-1, idling with a little noise.
+[[bus.frames]]
+id = "0C9"
+hz = 50
+data = "0BE0000000000000"
+counter = 7
+[[bus.frames.fields]]
+byte = 0
+length = 2
+value = 3040
+jitter = 60
+
+# Steering angle: 2048 is straight ahead.
+[[bus.frames]]
+id = "025"
+hz = 50
+data = "0800000000000000"
+counter = 7
+[[bus.frames.fields]]
+action = "steering"
+byte = 0
+length = 2
+wave = "sine"
+min = 0
+max = 4095
+period = 6.0
+rest = 2048
+
+# Brake: byte 0 pressure, byte 2 bit 0 the pedal switch.
+[[bus.frames]]
+id = "1A0"
+hz = 25
+data = "0000000000000000"
+counter = 7
+[[bus.frames.fields]]
+action = "brake"
+byte = 0
+wave = "square"
+min = 0
+max = 180
+period = 2.0
+[[bus.frames.fields]]
+action = "brake"
+byte = 2
+mask = 0x01
+wave = "square"
+min = 0
+max = 1
+period = 2.0
+
+# Wheel speeds, all zero while parked.
+[[bus.frames]]
+id = "0B4"
+hz = 25
+data = "0000000000000000"
+counter = 7
+
+# Body: byte 1 bit 0x20 is the left indicator.
+[[bus.frames]]
+id = "3B7"
+hz = 10
+data = "0001000000000000"
+[[bus.frames.fields]]
+action = "indicator"
+byte = 1
+mask = 0x20
+wave = "square"
+min = 0
+max = 1
+period = 0.7
+
+# Gear and transmission state, constant in park.
+[[bus.frames]]
+id = "260"
+hz = 10
+data = "1000000000000000"
+
+# Coolant and fuel gauge.
+[[bus.frames]]
+id = "2C1"
+hz = 5
+data = "8130000000000000"
+[[bus.frames.fields]]
+byte = 1
+value = 48
+jitter = 0.6
+
+# Lights and doors.
+[[bus.frames]]
+id = "3A0"
+hz = 5
+data = "0000000000000000"
+
+# Cluster, odometer, ambient.
+[[bus.frames]]
+id = "410"
+hz = 2
+data = "0017E80000000000"
+
+[[bus.frames]]
+id = "4C1"
+hz = 2
+data = "4000000000000000"
+
+[[bus.frames]]
+id = "520"
+hz = 1
+data = "0100000000000000"
