@@ -50,6 +50,7 @@ The person plugs things in and turns keys. You never ask them to do anything whi
 - `vin_info()`: offline decode: check digit, model year, manufacturer.
 - `raw_obd("0105")`: read-only raw request. Allowed services: 01, 02, 03, 06, 07, 09, 0A, 19, 22. Everything else is refused by the kernel. `raw_obd("22F190", ecu="7E9")` sends ATSH so Mode 22 hits that ECU.
 - `clear_dtcs()`: tier T1D. See Consent.
+- `listen(seconds=3, ids=None)`: listen to the CAN bus on the OBD port. Sends nothing to the car. Returns a capture: `.summary()` gives `verdict` (`open`: the car's own traffic reaches the port; `partial`: a few ids; `hidden`: silent, likely a gateway; `not_can`; `adapter_cannot_listen`), the ids heard with counts, and `buffer_full` (an ELM327 overflows on a busy bus, so the capture is a sample). `.frames` has `.id`, `.data`, `.wall`. Pass `ids=["025", "1A0"]` to hear only those, at a much better rate.
 - `describe_dtc("P0420")`, `dongle_doctor()`, `scenarios()`.
 - `maker_info()`: what car-use knows about this car's maker (looked up from the VIN, or pass a make). Protocols, the dealer tool, known patterns. Facts are tagged `[verified]`, `[common]` or `[unverified]`. Treat `[unverified]` as a lead and say so if you use it. Also on the command line: `car-use maker toyota`.
 - `tune_ini(path, defines=())`: parse a TunerStudio-compatible ECU's `.ini` (Speeduino, rusEFI, MegaSquirt): `.tables()`, `.channels`, `.summary()`. Pass `defines=("CELSIUS",)` if the user runs TunerStudio in Celsius. Read-only: car-use does not write tunes.
@@ -75,6 +76,13 @@ Common aliases:
 5. **Batch once a sequence works.** One script that reads codes, freeze frame, readiness and a 10 s watch beats five round trips.
 6. **Missing data is information.** `value=None` / "no data" means this car doesn't report that PID. Many EVs report very little over standard OBD.
 7. Keep what you learn about a specific car (quirks, which PIDs respond) in the agent workspace. Don't put it in the repo.
+
+## Steering, brake and recording
+
+- Standard OBD has no steering angle, brake pedal or indicator reading. To find out whether this car's OBD port carries them, run `car-use can-check`. With `open` or `partial`, `car-use can-check --find steering,brake,indicator` guides the person through turning the wheel, pressing the brake and switching an indicator on, and lists the message bytes that moved. Tell the person before you run it: car parked, handbrake on, engine running in a ventilated place. It takes about a minute and prints its prompts as it goes. Present the first lead for each signal as a best guess, and suggest running it twice.
+- `hidden` is not a fault. The car has a gateway. Standard OBD still works, and maker-specific Mode 22 identifiers may still reach steering angle.
+- `car-use record` logs OBD readings (`--pids`) and CAN frames (`--can`, or `--can-ids` for the ids `can-check` found) to CSV with UTC timestamps, for lining up with a dashcam. Set it up before the car moves. Never interact with the person while they drive.
+- To share results, `car-use can-check --report --model "..."` prints anonymised JSON (WMI and model year, never the VIN) for a Port report issue.
 
 ## Used-car checks
 
@@ -105,7 +113,8 @@ This is a real car that belongs to a person.
 
 ## Limits (this version)
 
-- OBD-II Mode 01/02/03/07/09/0A and Mode 22 reads through `raw_obd`. No BLE yet. No CAN sniffing yet.
+- OBD-II Mode 01/02/03/07/09/0A and Mode 22 reads through `raw_obd`. No BLE yet.
+- Listening (`listen`, `can-check`, `record --can`) uses the adapter's monitor mode on the standard CAN pins. Classic CAN only, not CAN FD. Message ids and byte positions differ per car; `can-check --find` finds candidates, it does not decode units.
 - KWP2000, ISO 9141-2 and J1850 cars (older Maruti, many pre-2008 cars) are read like CAN cars, but so far only against the simulator's `kwp2000` and `iso9141` virtual cars, not real ones. Connecting can take several seconds longer than on CAN.
 - `dtcs()["by_ecu"]` separates codes by CAN id when the adapter can turn headers on (CAN cars). Maker packs are early: few makers, and no maker-specific data identifiers yet.
 - Aftermarket ECUs: `.ini` parsing and log reading only. Live connection to Speeduino/rusEFI over their own protocol is coming.

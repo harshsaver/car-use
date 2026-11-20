@@ -12,6 +12,16 @@
     [dids]      "F190" = "hex bytes"  (Mode 22 data identifiers)
     [extra_ecus.7E9]  a second ECU. stored/pending/permanent, signals, dids.
                 Silent unless headers are on, or ATSH selects it.
+    [[bus.frames]]  broadcast traffic on the OBD port's CAN pins, heard in
+                monitor mode (ATMA). Omit [bus] for a car whose gateway keeps
+                the port silent. Each frame: id = "025", hz = 50,
+                data = "0000000000000000", counter = 7 (byte whose low nibble
+                rolls), and [[bus.frames.fields]]: byte, length (bytes,
+                big-endian) or mask (bits), then value/jitter, or wave
+                ("sine"|"square") with min, max, period. A field with
+                action = "steering"|"brake"|"indicator" moves only while the
+                simulator plays the person doing that, and sits at `rest`
+                (default min) otherwise.
 """
 from __future__ import annotations
 
@@ -40,6 +50,7 @@ class Scenario:
     freeze_frame: dict = field(default_factory=dict)
     dids: dict = field(default_factory=dict)
     extra_ecus: dict = field(default_factory=dict)
+    bus: list = field(default_factory=list)
     notes: str = ""
     source: str = ""
 
@@ -105,6 +116,7 @@ def from_dict(data: dict, name: str, source: str = "") -> Scenario:
         dtcs=data.get("dtcs", {}), monitors=data.get("monitors", {}),
         freeze_frame=data.get("freeze_frame", {}), dids=data.get("dids", {}),
         extra_ecus=_extra_ecus(data.get("extra_ecus") or {}),
+        bus=_bus(data.get("bus") or {}),
         notes=data.get("notes", ""), source=source)
 
 
@@ -131,4 +143,21 @@ def _extra_ecus(raw: dict) -> dict:
             "signals": dict(body.get("signals") or {}),
             "dids": {str(k).upper(): v for k, v in dict(body.get("dids") or {}).items()},
         }
+    return out
+
+
+def _bus(raw: dict) -> list[dict]:
+    """[[bus.frames]] as plain dicts with the id upper-cased and data as bytes."""
+    out = []
+    for frame in raw.get("frames") or []:
+        ident = str(frame["id"]).upper()
+        int(ident, 16)                      # a bad id fails at load, not mid-stream
+        if len(ident) not in (3, 8):
+            raise ValueError(f"bus frame id {ident!r} must be 3 (11-bit) or 8 (29-bit) hex digits")
+        data = bytes.fromhex(str(frame.get("data", "00" * 8)).replace(" ", ""))
+        if len(data) > 8:
+            raise ValueError(f"bus frame {ident} has more than 8 data bytes")
+        out.append({"id": ident, "hz": float(frame.get("hz", 10)), "data": data,
+                    "counter": frame.get("counter"),
+                    "fields": [dict(f) for f in frame.get("fields") or []]})
     return out

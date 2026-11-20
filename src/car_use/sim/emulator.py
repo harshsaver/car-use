@@ -11,10 +11,14 @@ Profiles mimic the adapters people own:
 """
 from __future__ import annotations
 
+import math
+import random
+import select
 import socket
 import socketserver
 import threading
 import time
+from collections import deque
 
 from ..obd import pids as P
 from .scenario import Scenario
@@ -46,6 +50,49 @@ class CarState:
         # what CarsBench grades evidence and safety from: it sits below every
         # harness, so it can't be faked from the agent's side.
         self.requests: list[tuple[float, str]] = []
+        # What the simulated person is doing to the car right now (for bus
+        # fields with an `action`): action name -> time it started.
+        self.actions: dict[str, float] = {}
+        self._counters = [0] * len(s.bus)
+
+    def act(self, action: str | None) -> None:
+        """The simulator's stand-in for a person: start an action, or None to stop all."""
+        with self.lock:
+            if action is None:
+                self.actions.clear()
+            else:
+                self.actions[action] = self.t()
+
+    def bus_payload(self, index: int) -> bytes:
+        """The next payload of broadcast frame `index`, as the car would send it now."""
+        spec = self.s.bus[index]
+        data = bytearray(spec["data"] or b"\x00")
+        now = self.t()
+        for f in spec["fields"]:
+            action = f.get("action")
+            if action is not None:
+                started = self.actions.get(action)
+                value = (_field_value(f, now - started) if started is not None
+                         else f.get("rest", f.get("min", 0)))
+            else:
+                value = _field_value(f, now)
+            byte = int(f.get("byte", 0))
+            if "mask" in f:
+                mask = int(f["mask"])
+                on = value >= (f.get("max", 1) + f.get("min", 0)) / 2 if "wave" in f else bool(value)
+                if byte < len(data):
+                    data[byte] = (data[byte] & ~mask & 0xFF) | (mask if on else 0)
+                continue
+            length = int(f.get("length", 1))
+            raw = max(0, min(int(round(value)), (1 << (8 * length)) - 1))
+            for i, b in enumerate(raw.to_bytes(length, "big")):
+                if byte + i < len(data):
+                    data[byte + i] = b
+        counter = spec.get("counter")
+        if counter is not None and int(counter) < len(data):
+            n = self._counters[index] = (self._counters[index] + 1) & 0x0F
+            data[int(counter)] = (data[int(counter)] & 0xF0) | n
+        return bytes(data)
 
     def t(self) -> float:
         return time.monotonic() - self.t0
@@ -107,6 +154,31 @@ class _Session:
         self.protocol = "0"
         self.kwp_inited = False
         self.tx_header = "7DF"
+        self.caf = True
+        self.cra: str | None = None
+        self.cf: int | None = None
+        self.cm: int | None = None
+        self.monitoring = False
+
+    def monitor_line(self, ident: str, data: bytes) -> str | None:
+        """A broadcast frame as ATMA prints it with the current H/S/CAF settings."""
+        if self.cra is not None and ident != self.cra:
+            return None
+        if self.cm is not None and (int(ident, 16) & self.cm) != ((self.cf or 0) & self.cm):
+            return None
+        if self.caf:
+            # Auto-formatting reads byte 0 as an ISO-TP length. Broadcast frames
+            # mostly are not ISO-TP, so most of them are dropped or cut short.
+            if not data or not 1 <= data[0] <= 7 or data[0] >= len(data):
+                return None
+            data = data[1:1 + data[0]]
+        sep = " " if self.spaces else ""
+        body = sep.join(f"{b:02X}" for b in data)
+        if not self.headers:
+            return body
+        head = ident if len(ident) == 3 or not self.spaces else \
+            " ".join(ident[i:i + 2] for i in range(0, 8, 2))
+        return head + sep + body
 
     @property
     def identity(self) -> str:
@@ -294,7 +366,27 @@ class _Session:
             self.tx_header = c[2:].upper() or "7DF"
             return ["OK"]
         if c == "MA":
-            return ["STOPPED"]
+            self.monitoring = True
+            return []
+        if c in ("CAF0", "CAF1"):
+            self.caf = c.endswith("1")
+            return ["OK"]
+        if c.startswith("CRA"):
+            self.cra = c[3:].upper() or None
+            return ["OK"]
+        if c == "AR":
+            self.cra = None
+            return ["OK"]
+        if c.startswith("CF") or c.startswith("CM"):
+            try:
+                value = int(c[2:], 16)
+            except ValueError:
+                return ["?"]
+            if c.startswith("CF"):
+                self.cf = value
+            else:
+                self.cm = value or None
+            return ["OK"]
         if c == "LP":
             return ["OK"]
         if c and (c[0].isalpha() or c[0] == "@"):
@@ -382,6 +474,25 @@ def _encode_extra_pid(spec: dict, pid: int) -> bytes | None:
     return decoded.encode(tuple(vals))
 
 
+def _field_value(f: dict, t: float) -> float:
+    if "wave" in f:
+        lo, hi, period = f.get("min", 0), f.get("max", 1), f.get("period", 1.0)
+        phase = (t % period) / period
+        if f["wave"] == "square":
+            return hi if phase < 0.5 else lo
+        return lo + (hi - lo) * (0.5 + 0.5 * math.sin(2 * math.pi * phase))
+    v = float(f.get("value", 0))
+    j = f.get("jitter", 0)
+    return v + random.uniform(-j, j) if j else v
+
+
+# How fast each adapter profile can print monitored frames, and how many it
+# buffers before BUFFER FULL. A genuine ELM327 behind a 38400-baud link prints
+# about 140 lines a second; a busy bus sends several times that.
+MONITOR_LINES_PER_S = {"genuine": 140.0, "stn": 2500.0}
+MONITOR_BUFFER_LINES = {"genuine": 8, "stn": 256}
+
+
 def _bitmap(pids: set[int]) -> bytes:
     bits = 0
     for p in pids:
@@ -413,11 +524,69 @@ class _Handler(socketserver.BaseRequestHandler):
                     out += text + eol
                 for ln in sess.handle(text):
                     out += ln + eol
+                if sess.monitoring:
+                    sess.monitoring = False
+                    try:
+                        if out:
+                            sock.sendall(out.encode("ascii"))
+                        rest = self._monitor(sess, sock, eol, interrupted=bool(buf))
+                    except OSError:
+                        return
+                    if rest is None:
+                        return
+                    buf = (buf.split(b"\r", 1)[1] if b"\r" in buf else b"") if buf else rest
+                    continue
                 out += eol + ">"
                 try:
                     sock.sendall(out.encode("ascii"))
                 except OSError:
                     return
+
+    def _monitor(self, sess: "_Session", sock: socket.socket, eol: str,
+                 interrupted: bool = False) -> bytes | None:
+        """Stream broadcast frames until any byte arrives, or the buffer overflows.
+
+        Returns whatever came in after the stopping carriage return, or None if
+        the client went away.
+        """
+        car = sess.car
+        frames = car.s.bus if car.s.ignition in ("run", "accessory") else []
+        rate = MONITOR_LINES_PER_S.get(sess.profile, MONITOR_LINES_PER_S["genuine"])
+        capacity = MONITOR_BUFFER_LINES.get(sess.profile, MONITOR_BUFFER_LINES["genuine"])
+        last = time.monotonic()
+        due = [last + random.uniform(0, 1 / f["hz"]) for f in frames]
+        backlog: deque[str] = deque()
+        credit = 0.0
+        while not interrupted:
+            ready, _, _ = select.select([sock], [], [], 0.004)
+            if ready:
+                data = sock.recv(1024)
+                if not data:
+                    return None
+                sock.sendall((eol + ">").encode("ascii"))
+                return data.split(b"\r", 1)[1] if b"\r" in data else b""
+            now = time.monotonic()
+            for i, f in enumerate(frames):
+                if now - due[i] > 0.5:
+                    due[i] = now
+                while due[i] <= now:
+                    due[i] += 1 / f["hz"]
+                    line = sess.monitor_line(f["id"], car.bus_payload(i))
+                    if line is not None:
+                        backlog.append(line)
+            credit = min(credit + (now - last) * rate, 4.0)
+            last = now
+            out = []
+            while backlog and credit >= 1:
+                out.append(backlog.popleft())
+                credit -= 1
+            if out:
+                sock.sendall((eol.join(out) + eol).encode("ascii"))
+            if len(backlog) > capacity:
+                sock.sendall(("BUFFER FULL" + eol + eol + ">").encode("ascii"))
+                return b""
+        sock.sendall((eol + ">").encode("ascii"))
+        return b""
 
 
 class _Server(socketserver.ThreadingTCPServer):

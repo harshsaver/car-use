@@ -1,0 +1,38 @@
+name: Port report
+description: Does this car's OBD port carry its own CAN traffic? Anonymised can-check results
+title: "Port report: "
+labels: ["area: cars"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        With the car parked, handbrake on and the engine running in a ventilated place, run:
+
+        `car-use can-check --find steering,brake,indicator --report --model "your model, trim and fuel"`
+
+        Paste the JSON it prints. It keeps the WMI and model year only. Do not paste a full VIN, a photo of the windshield, or a number plate. Reports from the simulator (`"simulated": true`) are not accepted.
+  - type: textarea
+    id: report
+    attributes:
+      label: Report JSON
+      description: The full output of `car-use can-check --report`.
+      render: json
+      placeholder: |
+        {
+          "schema": 1,
+          "vehicle": {"wmi": "MA3", "model_year": 2021, "model": "Swift VXi petrol"},
+          "verdict": "open"
+        }
+    validations:
+      required: true
+  - type: input
+    id: country
+    attributes:
+      label: Country the car was sold in
+      description: Optional. The same model can be wired differently in different markets.
+      placeholder: "India"
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Optional. Did you run --find twice? Did the same leads come up both times? Was the engine running?

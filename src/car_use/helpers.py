@@ -16,7 +16,7 @@ _state: dict = {"vehicle": None, "device": None}
 __all__ = ["car", "manifest", "signals", "read", "read_many", "watch", "dtcs", "readiness",
            "ready_for_inspection", "freeze_frame", "vin_info", "raw_obd", "clear_dtcs",
            "dongle_doctor", "scenarios", "describe_dtc", "maker_info", "tune_ini", "engine_log",
-           "Series"]
+           "listen", "Series"]
 
 
 def _configure(device: str | None) -> None:
@@ -198,6 +198,17 @@ def engine_log(path: str):
     """Read a .msl / CSV engine log: .columns, .column(name), .stats(name), .summary()."""
     from .ecu.logs import load_log
     return load_log(path)
+
+
+def listen(seconds: float = 3.0, ids: list[str] | None = None):
+    """Listen to the CAN bus on the OBD port without sending anything to the car.
+
+    Returns a Capture: .summary() (verdict open/partial/hidden, ids and counts),
+    .frames (each with .id, .data, .wall), .ids(). An ELM327 overflows on a busy
+    bus, so without `ids` this is a sample of the bus, not every frame.
+    """
+    from .obd.monitor import listen as _listen
+    return _listen(car().elm, seconds, ids)
 
 
 def dongle_doctor(save: bool = True) -> dict:

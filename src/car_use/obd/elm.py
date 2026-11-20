@@ -334,5 +334,90 @@ class Elm327:
                                 if len(payloads[0]) > 2 else "negative response")
         return payloads[0]
 
+    # -- listening ----------------------------------------------------------------
+    def monitor(self, seconds: float) -> "MonitorBurst":
+        """One ATMA burst: print every frame the adapter hears, for up to `seconds`.
+
+        Sends nothing to the car. A busy bus outruns most adapters' links, so
+        the adapter often stops by itself with BUFFER FULL; otherwise we stop
+        it with a carriage return and wait for the prompt. Lines are stamped
+        when they reach this computer, not when they were on the bus.
+        """
+        with self.lock:
+            self.t.drain()
+            start = time.monotonic()
+            burst = MonitorBurst()
+            pending = b""
+            prompt = False
+
+            def take(data: bytes) -> None:
+                nonlocal pending, prompt
+                if not data:
+                    return
+                pending += data
+                mono, wall = time.monotonic(), time.time()
+                parts = pending.replace(b"\n", b"\r").split(b"\r")
+                pending = parts.pop()
+                if b">" in pending:
+                    prompt, pending = True, b""
+                for raw in parts:
+                    text = raw.decode("ascii", errors="replace").strip().rstrip(">").strip()
+                    if b">" in raw:
+                        prompt = True
+                    up = text.upper()
+                    if not text or up in ("ATMA", "STOPPED") or up.startswith("SEARCHING"):
+                        continue
+                    if up == "?":
+                        burst.ended = "unsupported"
+                    elif "BUFFER FULL" in up:
+                        burst.ended = "buffer_full"
+                    elif up in ERRORS or up.startswith("<"):
+                        burst.errors.append(text)
+                    else:
+                        burst.lines.append((mono, wall, text))
+
+            try:
+                self.t.write(b"ATMA\r")
+                deadline = start + max(seconds, 0.0)
+                while not burst.ended and not prompt:
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        break
+                    take(self.t._read_some(max(0.01, min(0.05, left))))
+                if not prompt:
+                    if not burst.ended:
+                        self.t.write(b"\r")
+                    stop_by = time.monotonic() + 2.0
+                    while not prompt and time.monotonic() < stop_by:
+                        take(self.t._read_some(0.05))
+                    if not prompt:
+                        raise TransportError("adapter did not stop listening (no prompt "
+                                             f"after ATMA on {self.t.url})")
+            except BaseException:
+                # Never leave the adapter streaming: the next command would be
+                # swallowed as the keypress that stops it.
+                try:
+                    self.t.write(b"\r")
+                    self.t.read_until(b">", 1.0)
+                except (TransportError, OSError):
+                    pass
+                raise
+            finally:
+                burst.ended = burst.ended or "stopped"
+                burst.seconds = time.monotonic() - start
+                self.log.append((burst.seconds, "ATMA",
+                                 f"{len(burst.lines)} lines, {burst.ended}"))
+            self.t.drain()
+            return burst
+
     def close(self) -> None:
         self.t.close()
+
+
+@dataclass
+class MonitorBurst:
+    """What one ATMA burst heard: (monotonic, wall clock, line) per frame line."""
+    lines: list[tuple[float, float, str]] = field(default_factory=list)
+    ended: str = ""          # "stopped" | "buffer_full" | "unsupported"
+    errors: list[str] = field(default_factory=list)
+    seconds: float = 0.0
